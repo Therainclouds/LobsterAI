@@ -12,10 +12,11 @@ interface CoworkState {
   sessions: CoworkSessionSummary[];
   currentSessionId: string | null;
   currentSession: CoworkSession | null;
-  draftPrompt: string;
+  draftPrompts: Record<string, string>;
   unreadSessionIds: string[];
   isCoworkActive: boolean;
   isStreaming: boolean;
+  remoteManaged: boolean;
   pendingPermissions: CoworkPermissionRequest[];
   config: CoworkConfig;
 }
@@ -24,15 +25,17 @@ const initialState: CoworkState = {
   sessions: [],
   currentSessionId: null,
   currentSession: null,
-  draftPrompt: '',
+  draftPrompts: {},
   unreadSessionIds: [],
   isCoworkActive: false,
   isStreaming: false,
+  remoteManaged: false,
   pendingPermissions: [],
   config: {
     workingDirectory: '',
     systemPrompt: '',
     executionMode: 'local',
+    agentEngine: 'openclaw',
     memoryEnabled: true,
     memoryImplicitUpdateEnabled: true,
     memoryLlmJudgeEnabled: false,
@@ -50,6 +53,45 @@ const markSessionUnread = (state: CoworkState, sessionId: string) => {
   if (state.currentSessionId === sessionId) return;
   if (state.unreadSessionIds.includes(sessionId)) return;
   state.unreadSessionIds.push(sessionId);
+};
+
+const STREAMING_MERGE_PROBE_CHARS = 512;
+
+const computeStreamingSuffixPrefixOverlap = (left: string, right: string): number => {
+  const leftProbe = left.slice(-STREAMING_MERGE_PROBE_CHARS);
+  const rightProbe = right.slice(0, STREAMING_MERGE_PROBE_CHARS);
+  const maxOverlap = Math.min(leftProbe.length, rightProbe.length);
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (leftProbe.slice(-size) === rightProbe.slice(0, size)) {
+      return size;
+    }
+  }
+  return 0;
+};
+
+const mergeStreamingMessageContent = (previousContent: string, incomingContent: string): string => {
+  if (!incomingContent) return previousContent;
+  if (!previousContent) return incomingContent;
+  if (incomingContent === previousContent) return previousContent;
+
+  // Snapshot mode: upstream sends full content each update.
+  if (incomingContent.startsWith(previousContent)) {
+    return incomingContent;
+  }
+
+  // Guard against temporary partial rollback chunks.
+  if (previousContent.startsWith(incomingContent)) {
+    return previousContent;
+  }
+
+  // Another snapshot pattern where previous content is fully contained.
+  if (incomingContent.includes(previousContent) && incomingContent.length > previousContent.length) {
+    return incomingContent;
+  }
+
+  // Delta mode: append the non-overlapping tail.
+  const overlap = computeStreamingSuffixPrefixOverlap(previousContent, incomingContent);
+  return previousContent + incomingContent.slice(overlap);
 };
 
 const coworkSlice = createSlice({
@@ -101,8 +143,13 @@ const coworkSlice = createSlice({
       }
     },
 
-    setDraftPrompt(state, action: PayloadAction<string>) {
-      state.draftPrompt = action.payload;
+    setDraftPrompt(state, action: PayloadAction<{ sessionId: string; draft: string }>) {
+      const { sessionId, draft } = action.payload;
+      if (draft) {
+        state.draftPrompts[sessionId] = draft;
+      } else {
+        delete state.draftPrompts[sessionId];
+      }
     },
 
     addSession(state, action: PayloadAction<CoworkSession>) {
@@ -150,6 +197,17 @@ const coworkSlice = createSlice({
       }
     },
 
+    deleteSessions(state, action: PayloadAction<string[]>) {
+      const sessionIds = new Set(action.payload);
+      state.sessions = state.sessions.filter(s => !sessionIds.has(s.id));
+      state.unreadSessionIds = state.unreadSessionIds.filter((id) => !sessionIds.has(id));
+
+      if (state.currentSessionId && sessionIds.has(state.currentSessionId)) {
+        state.currentSessionId = null;
+        state.currentSession = null;
+      }
+    },
+
     addMessage(state, action: PayloadAction<{ sessionId: string; message: CoworkMessage }>) {
       const { sessionId, message } = action.payload;
 
@@ -176,7 +234,12 @@ const coworkSlice = createSlice({
       if (state.currentSession?.id === sessionId) {
         const messageIndex = state.currentSession.messages.findIndex(m => m.id === messageId);
         if (messageIndex !== -1) {
-          state.currentSession.messages[messageIndex].content = content;
+          const previousContent = state.currentSession.messages[messageIndex].content || '';
+          if (state.config.agentEngine === 'yd_cowork') {
+            state.currentSession.messages[messageIndex].content = mergeStreamingMessageContent(previousContent, content);
+          } else {
+            state.currentSession.messages[messageIndex].content = content;
+          }
         }
       }
 
@@ -185,6 +248,10 @@ const coworkSlice = createSlice({
 
     setStreaming(state, action: PayloadAction<boolean>) {
       state.isStreaming = action.payload;
+    },
+
+    setRemoteManaged(state, action: PayloadAction<boolean>) {
+      state.remoteManaged = action.payload;
     },
 
     updateSessionPinned(state, action: PayloadAction<{ sessionId: string; pinned: boolean }>) {
@@ -246,6 +313,7 @@ const coworkSlice = createSlice({
       state.currentSessionId = null;
       state.currentSession = null;
       state.isStreaming = false;
+      state.remoteManaged = false;
     },
   },
 });
@@ -259,9 +327,11 @@ export const {
   addSession,
   updateSessionStatus,
   deleteSession,
+  deleteSessions,
   addMessage,
   updateMessageContent,
   setStreaming,
+  setRemoteManaged,
   updateSessionPinned,
   updateSessionTitle,
   enqueuePendingPermission,

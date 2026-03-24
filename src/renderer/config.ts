@@ -71,6 +71,12 @@ export interface AppConfig {
       apiKey: string;
       baseUrl: string;
       apiFormat?: 'anthropic' | 'openai';
+      /** OAuth auth type: 'apikey' (default) or 'oauth' (MiniMax Portal OAuth) */
+      authType?: 'apikey' | 'oauth';
+      /** OAuth refresh token for automatic token renewal */
+      oauthRefreshToken?: string;
+      /** OAuth token expiry as Unix timestamp in milliseconds */
+      oauthTokenExpiresAt?: number;
       models?: Array<{
         id: string;
         name: string;
@@ -158,6 +164,17 @@ export interface AppConfig {
         supportsImage?: boolean;
       }>;
     };
+    stepfun: {
+      enabled: boolean;
+      apiKey: string;
+      baseUrl: string;
+      apiFormat?: 'anthropic' | 'openai';
+      models?: Array<{
+        id: string;
+        name: string;
+        supportsImage?: boolean;
+      }>;
+    };
     ollama: {
       enabled: boolean;
       apiKey: string;
@@ -186,6 +203,9 @@ export interface AppConfig {
       baseUrl: string;
       apiFormat?: 'anthropic' | 'openai';
       codingPlanEnabled?: boolean;
+      authType?: 'apikey' | 'oauth';
+      oauthRefreshToken?: string;
+      oauthTokenExpiresAt?: number;
       models?: Array<{
         id: string;
         name: string;
@@ -224,10 +244,9 @@ export const defaultConfig: AppConfig = {
   },
   model: {
     availableModels: [
-      { id: 'deepseek-chat', name: 'DeepSeek Chat', supportsImage: false },
       { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', supportsImage: false },
     ],
-    defaultModel: 'deepseek-chat',
+    defaultModel: 'deepseek-reasoner',
     defaultModelProvider: 'deepseek',
   },
   providers: {
@@ -269,8 +288,7 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://api.deepseek.com/anthropic',
       apiFormat: 'anthropic',
       models: [
-        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', supportsImage: false },
-        { id: 'deepseek-chat', name: 'DeepSeek Chat', supportsImage: false }
+        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', supportsImage: false }
       ]
     },
     moonshot: {
@@ -300,8 +318,8 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://api.minimaxi.com/anthropic',
       apiFormat: 'anthropic',
       models: [
-        { id: 'MiniMax-M2.5', name: 'MiniMax M2.5', supportsImage: false },
-        { id: 'MiniMax-M2.1', name: 'MiniMax M2.1', supportsImage: false }
+        { id: 'MiniMax-M2.7', name: 'MiniMax M2.7', supportsImage: false },
+        { id: 'MiniMax-M2.5', name: 'MiniMax M2.5', supportsImage: false }
       ]
     },
     youdaozhiyun: {
@@ -334,6 +352,15 @@ export const defaultConfig: AppConfig = {
       apiFormat: 'anthropic',
       models: [
         { id: 'mimo-v2-flash', name: 'MiMo V2 Flash', supportsImage: false }
+      ]
+    },
+    stepfun: {
+      enabled: false,
+      apiKey: '',
+      baseUrl: 'https://api.stepfun.com/v1',
+      apiFormat: 'openai',
+      models: [
+        { id: 'step-3.5-flash', name: 'Step 3.5 Flash', supportsImage: false }
       ]
     },
     volcengine: {
@@ -404,7 +431,7 @@ export const CONFIG_KEYS = {
 };
 
 // 模型提供商分类
-export const CHINA_PROVIDERS = ['deepseek', 'moonshot', 'qwen', 'zhipu', 'minimax', 'youdaozhiyun', 'xiaomi', 'volcengine', 'ollama', 'custom'] as const;
+export const CHINA_PROVIDERS = ['deepseek', 'moonshot', 'qwen', 'zhipu', 'minimax', 'volcengine', 'youdaozhiyun', 'stepfun', 'xiaomi', 'ollama', 'custom'] as const;
 export const GLOBAL_PROVIDERS = ['openai', 'gemini', 'anthropic', 'openrouter'] as const;
 export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 

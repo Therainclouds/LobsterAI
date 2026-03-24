@@ -2,23 +2,24 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import {
-  ArrowUpTrayIcon,
   ArrowDownTrayIcon,
   CheckCircleIcon,
-  FolderOpenIcon,
-  LinkIcon,
-  MagnifyingGlassIcon,
-  PlusCircleIcon,
-  PuzzlePieceIcon,
-  TrashIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
+import SearchIcon from '../icons/SearchIcon';
+import PlusCircleIcon from '../icons/PlusCircleIcon';
+import UploadIcon from '../icons/UploadIcon';
+import FolderOpenIcon from '../icons/FolderOpenIcon';
+import LinkIcon from '../icons/LinkIcon';
+import PuzzleIcon from '../icons/PuzzleIcon';
+import TrashIcon from '../icons/TrashIcon';
 import { i18nService } from '../../services/i18n';
 import { skillService, resolveLocalizedText } from '../../services/skill';
 import { setSkills } from '../../store/slices/skillSlice';
 import { RootState } from '../../store';
 import { Skill, MarketplaceSkill, MarketTag } from '../../types/skill';
 import ErrorMessage from '../ErrorMessage';
+import SkillSecurityReport from './SkillSecurityReport';
 
 type SkillTab = 'installed' | 'marketplace';
 
@@ -42,6 +43,9 @@ const SkillsManager: React.FC = () => {
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [skillPendingDelete, setSkillPendingDelete] = useState<Skill | null>(null);
   const [isDeletingSkill, setIsDeletingSkill] = useState(false);
+  const [securityReport, setSecurityReport] = useState<any>(null);
+  const [pendingInstallId, setPendingInstallId] = useState<string | null>(null);
+  const [isConfirmingInstall, setIsConfirmingInstall] = useState(false);
 
   const addSkillMenuRef = useRef<HTMLDivElement>(null);
   const addSkillButtonRef = useRef<HTMLButtonElement>(null);
@@ -219,8 +223,23 @@ const SkillsManager: React.FC = () => {
     setSkillActionError('');
     const result = await skillService.downloadSkill(trimmedSource);
     setIsDownloadingSkill(false);
+    console.log('[SkillsManager] downloadSkill result:', JSON.stringify({
+      success: result.success,
+      error: result.error,
+      hasAuditReport: !!result.auditReport,
+      pendingInstallId: result.pendingInstallId,
+      riskLevel: result.auditReport?.riskLevel,
+      findingsCount: result.auditReport?.findings?.length,
+    }));
     if (!result.success) {
       setSkillActionError(result.error || i18nService.t('skillDownloadFailed'));
+      return;
+    }
+    // Security audit returned — show report modal
+    if (result.auditReport && result.pendingInstallId) {
+      setIsGithubImportOpen(false);
+      setSecurityReport(result.auditReport);
+      setPendingInstallId(result.pendingInstallId);
       return;
     }
     if (result.skills) {
@@ -275,6 +294,12 @@ const SkillsManager: React.FC = () => {
         setSkillActionError(result.error || i18nService.t('skillInstallFailed'));
         return;
       }
+      // Security audit returned — show report modal
+      if (result.auditReport && result.pendingInstallId) {
+        setSecurityReport(result.auditReport);
+        setPendingInstallId(result.pendingInstallId);
+        return;
+      }
       if (result.skills) {
         dispatch(setSkills(result.skills));
       }
@@ -282,6 +307,30 @@ const SkillsManager: React.FC = () => {
       setSkillActionError(i18nService.t('skillInstallFailed'));
     } finally {
       setInstallingSkillId(null);
+    }
+  };
+
+  const handleSecurityReportAction = async (action: 'install' | 'installDisabled' | 'cancel') => {
+    if (!pendingInstallId) return;
+    setIsConfirmingInstall(true);
+    try {
+      const result = await skillService.confirmInstall(pendingInstallId, action);
+      if (result.success && result.skills) {
+        dispatch(setSkills(result.skills));
+      }
+      if (!result.success && result.error) {
+        setSkillActionError(result.error);
+      }
+    } catch {
+      setSkillActionError(i18nService.t('skillInstallFailed'));
+    } finally {
+      setSecurityReport(null);
+      setPendingInstallId(null);
+      setIsConfirmingInstall(false);
+      setInstallingSkillId(null);
+      setSkillDownloadSource('');
+      setIsAddSkillMenuOpen(false);
+      setIsGithubImportOpen(false);
     }
   };
 
@@ -302,7 +351,7 @@ const SkillsManager: React.FC = () => {
 
       <div className="flex items-center gap-3">
         <div className="relative flex-1">
-          <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+          <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
           <input
             type="text"
             placeholder={i18nService.t('searchSkills')}
@@ -327,13 +376,16 @@ const SkillsManager: React.FC = () => {
               ref={addSkillMenuRef}
               className="absolute right-0 mt-2 w-72 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-lg z-50 overflow-hidden"
             >
+              <p className="px-3 py-2 text-[11px] text-orange-600 dark:text-orange-400 border-b dark:border-claude-darkBorder border-claude-border">
+                {i18nService.t('addSkillSecurityTip')}
+              </p>
               <button
                 type="button"
                 onClick={handleUploadSkillZip}
                 disabled={isDownloadingSkill}
                 className="w-full flex items-center gap-3 px-3 py-2.5 text-sm dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50"
               >
-                <ArrowUpTrayIcon className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                <UploadIcon className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
                 <span>{i18nService.t('uploadSkillZip')}</span>
               </button>
               <button
@@ -410,7 +462,7 @@ const SkillsManager: React.FC = () => {
               <div className="flex items-start justify-between mb-2">
                 <div className="flex items-center gap-2 min-w-0">
                   <div className="w-7 h-7 rounded-lg dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center flex-shrink-0">
-                    <PuzzlePieceIcon className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                    <PuzzleIcon className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
                   </div>
                   <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
                     {skill.name}
@@ -522,7 +574,7 @@ const SkillsManager: React.FC = () => {
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex items-center gap-2 min-w-0">
                     <div className="w-7 h-7 rounded-lg dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center flex-shrink-0">
-                      <PuzzlePieceIcon className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                      <PuzzleIcon className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
                     </div>
                     <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
                       {skill.name}
@@ -589,7 +641,7 @@ const SkillsManager: React.FC = () => {
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="w-9 h-9 rounded-lg dark:bg-claude-darkBg bg-claude-bg flex items-center justify-center flex-shrink-0">
-                  <PuzzlePieceIcon className="h-5 w-5 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                  <PuzzleIcon className="h-5 w-5 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
                 </div>
                 <div className="min-w-0">
                   <div className="text-base font-semibold dark:text-claude-darkText text-claude-text truncate">
@@ -678,7 +730,7 @@ const SkillsManager: React.FC = () => {
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="w-9 h-9 rounded-lg dark:bg-claude-darkBg bg-claude-bg flex items-center justify-center flex-shrink-0">
-                  <PuzzlePieceIcon className="h-5 w-5 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                  <PuzzleIcon className="h-5 w-5 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
                 </div>
                 <div className="min-w-0">
                   <div className="text-base font-semibold dark:text-claude-darkText text-claude-text truncate">
@@ -881,6 +933,14 @@ const SkillsManager: React.FC = () => {
           </div>
         </div>
       , document.body)}
+
+      {securityReport && (
+        <SkillSecurityReport
+          report={securityReport}
+          onAction={handleSecurityReportAction}
+          isLoading={isConfirmingInstall}
+        />
+      )}
     </div>
   );
 };
