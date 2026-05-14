@@ -64,6 +64,16 @@ const MEMORY_REQUEST_TAIL_SPLIT_RE = /[,，。]\s*(?:请|麻烦)?你(?:帮我|�
 const MEMORY_PROCEDURAL_TEXT_RE = /(执行以下命令|run\s+(?:the\s+)?following\s+command|\b(?:cd|npm|pnpm|yarn|node|python|bash|sh|git|curl|wget)\b|\$[A-Z_][A-Z0-9_]*|&&|--[a-z0-9-]+|\/tmp\/|\.sh\b|\.bat\b|\.ps1\b)/i;
 const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:技能|skill)/i;
 const WINDOWS_HIDE_INIT_SCRIPT_NAME = 'windows_hide_init.cjs';
+type CoworkInputFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size?: number;
+  path: string;
+};
+const INPUT_FILE_MAX_COUNT = 6;
+const INPUT_FILE_MAX_CHARS = 16_000;
+const INPUT_FILE_TOTAL_MAX_CHARS = 48_000;
 const WINDOWS_HIDE_INIT_SCRIPT_CONTENT = [
   '\'use strict\';',
   '',
@@ -818,6 +828,71 @@ export class CoworkRunner extends EventEmitter {
     return `${prompt.trimEnd()}${separator}${linesToAppend.join('\n')}`;
   }
 
+  private sanitizeInputFileAttr(value: string): string {
+    return value.replace(/[<>&"']/g, (char) => ({
+      '<': '&lt;',
+      '>': '&gt;',
+      '&': '&amp;',
+      '"': '&quot;',
+      '\'': '&apos;',
+    }[char] ?? char));
+  }
+
+  private shouldInlineInputFile(file: CoworkInputFile): boolean {
+    const mimeType = file.mimeType.toLowerCase();
+    if (mimeType.startsWith('text/')) {
+      return true;
+    }
+    return [
+      'application/json',
+      'application/xml',
+      'text/xml',
+      'application/yaml',
+      'text/yaml',
+      'text/tab-separated-values',
+    ].includes(mimeType);
+  }
+
+  private readInputFileText(file: CoworkInputFile, maxChars: number): string | null {
+    if (!this.shouldInlineInputFile(file) || !fs.existsSync(file.path)) {
+      return null;
+    }
+    const content = fs.readFileSync(file.path, 'utf8').replace(/\u0000/g, '');
+    return this.truncateLargeContent(content, maxChars);
+  }
+
+  private buildInputFilesContext(inputFiles: CoworkInputFile[]): string {
+    if (inputFiles.length === 0) {
+      return '';
+    }
+    const blocks: string[] = [];
+    let remainingChars = INPUT_FILE_TOTAL_MAX_CHARS;
+    for (const file of inputFiles.slice(0, INPUT_FILE_MAX_COUNT)) {
+      const blockBudget = Math.min(INPUT_FILE_MAX_CHARS, remainingChars);
+      if (blockBudget <= 0) {
+        break;
+      }
+      const inlineText = this.readInputFileText(file, blockBudget);
+      const attrs = `id="${this.sanitizeInputFileAttr(file.id)}" name="${this.sanitizeInputFileAttr(file.name)}" mimeType="${this.sanitizeInputFileAttr(file.mimeType)}"`;
+      if (inlineText) {
+        blocks.push(`<input_file ${attrs}>\n${inlineText}\n</input_file>`);
+        remainingChars -= inlineText.length;
+        continue;
+      }
+      blocks.push(`<input_file ${attrs}>[已附带文件元数据；如需进一步读取，请在工作区中按文件名 ${this.sanitizeInputFileAttr(file.name)} 查找]</input_file>`);
+    }
+    if (blocks.length === 0) {
+      return '';
+    }
+    return [
+      '以下是当前回合已结构化注入的上传文件内容。',
+      '这些文件内容已经提供给你，不要再次通过路径或文件工具重新定位它们；直接基于这些文件块回答，除非用户明确要求进一步操作文件。',
+      '<input_files>',
+      blocks.join('\n\n'),
+      '</input_files>',
+    ].join('\n');
+  }
+
   private truncateLargeContent(content: string, maxChars: number): string {
     if (content.length <= maxChars) {
       return content;
@@ -1414,6 +1489,7 @@ export class CoworkRunner extends EventEmitter {
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
       imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
+      inputFiles?: CoworkInputFile[];
     } = {}
   ): Promise<void> {
     this.stoppedSessions.delete(sessionId);
@@ -1433,6 +1509,14 @@ export class CoworkRunner extends EventEmitter {
       }
       if (options.imageAttachments?.length) {
         messageMetadata.imageAttachments = options.imageAttachments;
+      }
+      if (options.inputFiles?.length) {
+        messageMetadata.inputFiles = options.inputFiles.map(file => ({
+          id: file.id,
+          name: file.name,
+          mimeType: file.mimeType,
+          size: file.size,
+        }));
       }
       const userMessage = this.store.addMessage(sessionId, {
         type: 'user',
@@ -1499,13 +1583,13 @@ export class CoworkRunner extends EventEmitter {
         effectivePrompt = this.injectLocalHistoryPrompt(sessionId, prompt, effectivePrompt);
       }
 
-      await this.runClaudeCode(activeSession, effectivePrompt, sessionCwd, effectiveSystemPrompt, options.imageAttachments);
+      await this.runClaudeCode(activeSession, effectivePrompt, sessionCwd, effectiveSystemPrompt, options.imageAttachments, options.inputFiles);
     } catch (error) {
       console.error('Cowork session error:', error);
     }
   }
 
-  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[]; imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }> } = {}): Promise<void> {
+  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[]; imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>; inputFiles?: CoworkInputFile[] } = {}): Promise<void> {
     this.stoppedSessions.delete(sessionId);
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) {
@@ -1514,6 +1598,7 @@ export class CoworkRunner extends EventEmitter {
         skillIds: options.skillIds,
         systemPrompt: options.systemPrompt,
         imageAttachments: options.imageAttachments,
+        inputFiles: options.inputFiles,
       });
       return;
     }
@@ -1528,6 +1613,14 @@ export class CoworkRunner extends EventEmitter {
     }
     if (options.imageAttachments?.length) {
       messageMetadata.imageAttachments = options.imageAttachments;
+    }
+    if (options.inputFiles?.length) {
+      messageMetadata.inputFiles = options.inputFiles.map(file => ({
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+      }));
     }
     console.log('[CoworkRunner] continueSession: building user message', {
       sessionId,
@@ -1584,7 +1677,7 @@ export class CoworkRunner extends EventEmitter {
     try {
       const promptPrefix = this.buildPromptPrefix();
       const effectivePrompt = promptPrefix ? `${promptPrefix}\n\n---\n\n${prompt}` : prompt;
-      await this.runClaudeCode(activeSession, effectivePrompt, sessionCwd, effectiveSystemPrompt, options.imageAttachments);
+      await this.runClaudeCode(activeSession, effectivePrompt, sessionCwd, effectiveSystemPrompt, options.imageAttachments, options.inputFiles);
     } catch (error) {
       console.error('Cowork continue error:', error);
     }
@@ -1600,27 +1693,6 @@ export class CoworkRunner extends EventEmitter {
     }
     this.clearPendingPermissions(sessionId);
     this.store.updateSession(sessionId, { status: 'idle' });
-  }
-
-  onSessionDeleted(sessionId: string): void {
-    try {
-      this.stopSession(sessionId);
-    } catch {
-      // stopSession may fail if the DB row is already gone; proceed with cleanup.
-    }
-    // Remove from stoppedSessions so it doesn't linger after deletion.
-    this.stoppedSessions.delete(sessionId);
-    this.lastTurnMemoryKeyBySession.delete(sessionId);
-    // Purge any queued memory updates for the deleted session.
-    const remaining: QueuedTurnMemoryUpdate[] = [];
-    for (const job of this.turnMemoryQueue) {
-      if (job.sessionId === sessionId) {
-        this.turnMemoryQueueKeys.delete(job.key);
-      } else {
-        remaining.push(job);
-      }
-    }
-    this.turnMemoryQueue = remaining;
   }
 
   respondToPermission(requestId: string, result: PermissionResult): void {
@@ -2434,7 +2506,8 @@ export class CoworkRunner extends EventEmitter {
     prompt: string,
     cwd: string,
     systemPrompt: string,
-    imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>
+    imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>,
+    inputFiles?: CoworkInputFile[],
   ): Promise<void> {
     const { sessionId } = activeSession;
     if (this.isSessionStopRequested(sessionId, activeSession)) {
@@ -2452,7 +2525,13 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
 
-    const effectivePrompt = this.augmentPromptWithReferencedWorkspaceFiles(prompt, resolvedCwd);
+    const inputFilesContext = this.buildInputFilesContext(inputFiles ?? []);
+    const promptWithInputFiles = inputFilesContext
+      ? `${inputFilesContext}\n\n用户请求：\n${prompt.trim()}`.trim()
+      : prompt;
+    const effectivePrompt = inputFilesContext
+      ? promptWithInputFiles
+      : this.augmentPromptWithReferencedWorkspaceFiles(promptWithInputFiles, resolvedCwd);
 
     activeSession.executionMode = 'local';
     this.store.updateSession(sessionId, { executionMode: 'local' });
